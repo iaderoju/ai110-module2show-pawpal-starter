@@ -43,6 +43,37 @@ Scans the plan after `generate_plan()` and returns a list of warning strings —
 ### Recurring tasks — `Task.next_occurrence()`
 Tasks can be marked `recurrence="daily"` or `recurrence="weekly"`. When `Scheduler.mark_task_done()` completes a recurring task, it automatically appends a fresh copy to the pet's task list with the next `due_date` calculated via Python's `timedelta`.
 
+## Testing PawPal+
+
+### Running the test suite
+
+```bash
+python -m pytest
+```
+
+To see verbose output with each test name:
+
+```bash
+python -m pytest -v
+```
+
+### What the tests cover
+
+| Area | Tests |
+|------|-------|
+| **Task completion** | `mark_complete()` flips status to `True`; calling it twice is safe (idempotent) |
+| **Task addition** | `add_task()` increases count by one; multiple additions tracked correctly; task is retrievable from `pet.tasks` |
+| **Scheduler budget** | Scheduled minutes never exceed `available_minutes`; tasks are skipped when the budget is full |
+| **Sorting correctness** | `sort_by_time()` returns tasks in morning → afternoon → evening → anytime order regardless of add order; returns `[]` on an empty schedule |
+| **Recurrence logic** | Completing a `recurrence="daily"` task appends a new task due the next day with `completed=False`; non-recurring tasks do not spawn new tasks |
+| **Conflict detection** | Same-pet duplicate category/slot flagged as `"same pet"` conflict; two different pets needing the same category in the same slot flagged as `"cross-pet"` conflict |
+
+### Confidence level
+
+**★★★★☆ (4/5)**
+
+The scheduler's core behaviors — budget enforcement, priority ranking, sorting, recurrence, and conflict detection — are all covered by passing tests. Confidence is high for the happy-path and the most important edge cases (empty schedule, non-recurring tasks, double-completion). One star is withheld because time-slot tie-breaking within the same priority level and multi-pet budget interaction under low energy levels are not yet tested.
+
 ## Getting started
 
 ### Setup
