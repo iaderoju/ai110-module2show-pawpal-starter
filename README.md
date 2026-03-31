@@ -22,6 +22,27 @@ Your final app should:
 - Display the plan clearly (and ideally explain the reasoning)
 - Include tests for the most important scheduling behaviors
 
+## Smarter Scheduling
+
+The `Scheduler` class has been extended with three algorithmic improvements:
+
+### Sort by time slot — `sort_by_time()`
+Returns the scheduled task list ordered chronologically (morning → afternoon → evening → anytime) using Python's `sorted()` with a lambda key. Tasks can be added in any order; the output is always time-coherent.
+
+### Filter tasks — `filter_tasks(completed, pet_name)`
+Returns a filtered view of the schedule without mutating it. Both parameters are optional and composable:
+- `filter_tasks(pet_name="Mochi")` — one pet's tasks only
+- `filter_tasks(completed=False)` — pending tasks only
+- `filter_tasks(completed=True, pet_name="Luna")` — Luna's completed tasks
+
+### Conflict detection — `detect_conflicts()`
+Scans the plan after `generate_plan()` and returns a list of warning strings — never crashes the program. Two conflict types are caught:
+- **Same-pet conflict** — one pet has two tasks of the same category in the same slot (e.g. two walks in the morning)
+- **Cross-pet conflict** — different pets require the same category of care in the same slot, double-booking the owner
+
+### Recurring tasks — `Task.next_occurrence()`
+Tasks can be marked `recurrence="daily"` or `recurrence="weekly"`. When `Scheduler.mark_task_done()` completes a recurring task, it automatically appends a fresh copy to the pet's task list with the next `due_date` calculated via Python's `timedelta`.
+
 ## Getting started
 
 ### Setup

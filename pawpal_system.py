@@ -5,7 +5,7 @@ Backend classes for the pet care planning assistant.
 
 from dataclasses import dataclass, field
 from typing import Optional
-from datetime import date as Date
+from datetime import date as Date, timedelta
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +24,8 @@ class Task:
     frequency_per_day: int = 1
     notes: str = ""
     completed: bool = False
+    recurrence: Optional[str] = None        # "daily" | "weekly" | None
+    due_date: Optional[Date] = None         # date this task is due; None = no fixed date
 
     def is_high_priority(self) -> bool:
         """Return True if this task is marked high priority."""
@@ -37,6 +39,38 @@ class Task:
     def mark_complete(self) -> None:
         """Mark this task as completed."""
         self.completed = True
+
+    def next_occurrence(self) -> Optional["Task"]:
+        """Return a fresh, incomplete copy of this task scheduled for the next occurrence.
+
+        Uses ``timedelta`` to advance the due date based on the recurrence cadence:
+          - ``"daily"``  → ``due_date + timedelta(days=1)``
+          - ``"weekly"`` → ``due_date + timedelta(weeks=1)``
+
+        If ``due_date`` is not set, today's date is used as the base for the calculation.
+
+        Returns:
+            A new ``Task`` instance with ``completed=False`` and an updated ``due_date``,
+            or ``None`` if ``self.recurrence`` is ``None``.
+        """
+        if self.recurrence is None:
+            return None
+
+        base = self.due_date or Date.today()
+        delta = timedelta(days=1) if self.recurrence == "daily" else timedelta(weeks=1)
+
+        return Task(
+            name=self.name,
+            category=self.category,
+            duration_minutes=self.duration_minutes,
+            priority=self.priority,
+            preferred_time_of_day=self.preferred_time_of_day,
+            frequency_per_day=self.frequency_per_day,
+            notes=self.notes,
+            completed=False,
+            recurrence=self.recurrence,
+            due_date=base + delta,
+        )
 
     def __repr__(self) -> str:
         """Return a compact string representation showing name, category, priority, and status."""
@@ -262,6 +296,64 @@ class Scheduler:
 
     # -- Public API --------------------------------------------------------
 
+    def detect_conflicts(self) -> list[str]:
+        """Scan the scheduled plan and return human-readable conflict warnings.
+
+        Two conflict types are detected using a lightweight O(n) dict scan.
+        The method never raises an exception — callers receive plain strings
+        and decide how to display or log them.
+
+        Conflict types:
+
+        1. **Same-pet conflict** — one pet has two tasks of the same *category*
+           in the same time slot (e.g. two ``"walk"`` tasks for Mochi in the
+           morning).  The owner cannot physically perform both simultaneously.
+
+        2. **Cross-pet conflict** — two *different* pets both require a task of
+           the same category in the same slot (e.g. Mochi and Luna both need
+           ``"feed"`` in the morning).  The owner is effectively double-booked.
+
+        Algorithm:
+            Pass 1 builds ``seen_per_pet``: key = ``(pet_name, slot, category)``
+            Pass 2 builds ``seen_cross``:   key = ``(slot, category)``
+            A duplicate key on either pass appends a warning string.
+
+        Returns:
+            A list of warning strings (may be empty if no conflicts are found).
+            ``generate_plan()`` must be called before ``detect_conflicts()``
+            or the result will always be an empty list.
+        """
+        warnings: list[str] = []
+
+        # --- 1. Same-pet conflicts -------------------------------------------
+        seen_per_pet: dict[tuple, str] = {}  # (pet_name, slot, category) -> task_name
+        for entry in self.scheduled:
+            key = (entry["pet"].name, entry["time_slot"], entry["task"].category)
+            if key in seen_per_pet:
+                warnings.append(
+                    f"CONFLICT (same pet): [{entry['pet'].name}] has two "
+                    f"'{entry['task'].category}' tasks in the {entry['time_slot']} slot — "
+                    f"'{seen_per_pet[key]}' and '{entry['task'].name}'"
+                )
+            else:
+                seen_per_pet[key] = entry["task"].name
+
+        # --- 2. Cross-pet conflicts ------------------------------------------
+        seen_cross: dict[tuple, str] = {}    # (slot, category) -> pet_name
+        for entry in self.scheduled:
+            key = (entry["time_slot"], entry["task"].category)
+            pet_name = entry["pet"].name
+            if key in seen_cross and seen_cross[key] != pet_name:
+                warnings.append(
+                    f"CONFLICT (cross-pet): '{entry['task'].category}' tasks for "
+                    f"[{seen_cross[key]}] and [{pet_name}] overlap in the "
+                    f"{entry['time_slot']} slot — owner may be double-booked"
+                )
+            else:
+                seen_cross[key] = pet_name
+
+        return warnings
+
     def generate_plan(self) -> None:
         """Rank all pending tasks by priority and greedily schedule them within the owner's time budget."""
         self.scheduled = []
@@ -354,12 +446,72 @@ class Scheduler:
         }
 
     def mark_task_done(self, task_name: str) -> bool:
-        """Find a scheduled task by name, mark it complete, and return True; return False if not found."""
+        """Mark a scheduled task complete and auto-schedule its next occurrence if recurring.
+
+        When a task with recurrence="daily" or "weekly" is completed, next_occurrence()
+        creates a fresh Task using timedelta and appends it to the pet's task list so it
+        appears in the next generate_plan() call.
+
+        Returns True if the task was found, False otherwise.
+        """
         for entry in self.scheduled:
             if entry["task"].name == task_name:
-                entry["task"].mark_complete()
+                task: Task = entry["task"]
+                task.mark_complete()
+                next_task = task.next_occurrence()
+                if next_task is not None:
+                    entry["pet"].add_task(next_task)
                 return True
         return False
+
+    def sort_by_time(self) -> list[dict]:
+        """Return scheduled entries sorted by chronological time-slot order.
+
+        Uses Python's ``sorted()`` with a lambda key that maps each entry's
+        ``time_slot`` to its index in ``TIME_ORDER``
+        (morning → afternoon → evening → anytime), so the result is always
+        chronological regardless of the order tasks were added or scheduled.
+
+        Returns:
+            A new list of scheduled-entry dicts in time-slot order.
+            The original ``self.scheduled`` list is not mutated.
+        """
+        return sorted(
+            self.scheduled,
+            key=lambda entry: (
+                self.TIME_ORDER.index(entry["time_slot"])
+                if entry["time_slot"] in self.TIME_ORDER
+                else len(self.TIME_ORDER)
+            ),
+        )
+
+    def filter_tasks(
+        self,
+        completed: Optional[bool] = None,
+        pet_name: Optional[str] = None,
+    ) -> list[dict]:
+        """Return scheduled entries filtered by completion status and/or pet name.
+
+        Both parameters are optional and can be combined.  Omitting a parameter
+        means that dimension is not filtered.
+
+        Args:
+            completed: ``True``  → return only completed tasks.
+                       ``False`` → return only incomplete (pending) tasks.
+                       ``None``  → completion status is not used as a filter.
+            pet_name:  When provided, only entries whose ``pet.name`` matches
+                       this string exactly are included.
+
+        Returns:
+            A filtered list of scheduled-entry dicts.  The original
+            ``self.scheduled`` list is not mutated.
+        """
+        results = self.scheduled
+        if completed is not None:
+            results = [e for e in results if e["task"].completed == completed]
+        if pet_name is not None:
+            results = [e for e in results if e["pet"].name == pet_name]
+        return results
 
     def __repr__(self) -> str:
         """Return a compact string showing the owner, date, and scheduled/skipped task counts."""
